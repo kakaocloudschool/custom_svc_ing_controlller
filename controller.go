@@ -15,6 +15,10 @@ import (
 	appslisters "k8s.io/client-go/listers/apps/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
+
+	// https://pkg.go.dev/k8s.io/apimachinery/pkg/api/errors
+	// google : api machinery error godoc
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 )
 
 type controller struct {
@@ -73,22 +77,42 @@ func (c *controller) proccessItem() bool {
 	// 데이터가 있는 경우 item의 cache 데이터에 정보를 불러온다.
 	key, err := cache.MetaNamespaceKeyFunc(item)
 	if err != nil {
-		fmt.Print("getting key from cache %s\n", err.Error())
+		fmt.Printf("getting key from cache %s\n", err.Error())
 	}
 
 	// key 정보를 바탕으로 네임 스페이스를 분리한다.
 	// 현재는 에러를 별도로 처리하고 있지는 않음.
 	ns, name, err := cache.SplitMetaNamespaceKey(key)
 	if err != nil {
-		fmt.Print("SplitMetaNamespaceKey error %s \n", err.Error())
+		fmt.Printf("SplitMetaNamespaceKey error %s \n", err.Error())
 		return false
 	}
+	// Check ADD or Del  여부 확인
+	// Del 여부를 확인하기 위해 서버에 삭제되었는지 여부를 확인한다.
+	// API 서버에 직접 쿼리한다. (이유는, 캐시에는 동기화되지 않았을 가능성이 있다. )
+	ctx := context.Background()
+	_, err = c.clientset.AppsV1().Deployments(ns).Get(ctx, name, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		fmt.Printf("deployment %s was deleted ", name)
+		// delete service
+		err := c.clientset.CoreV1().Services(ns).Delete(ctx, name, metav1.DeleteOptions{})
+		if err != nil {
+			fmt.Printf("deleting service %s, error %s \n", name, err.Error())
+			return false
+		}
+		err = c.clientset.NetworkingV1().Ingresses(ns).Delete(ctx, name, metav1.DeleteOptions{})
+		if err != nil {
+			fmt.Printf("deleting ingress %s, error %s\n", name, err.Error())
+			return false
+		}
+		return true
+	}
 
-	// 원하는 작업을 수행한다.
+	// ADD  작업을 수행한다.
 	err = c.syncDeployment(ns, name)
 	if err != nil {
 		// 실패 하더라도, 재 시도는 기본적으로 수행함으로 retry 를 할 필요가 있다.
-		fmt.Print("syncing deployment %s\n", err.Error())
+		fmt.Printf("syncing deployment %s\n", err.Error())
 		return false
 	}
 	return true
