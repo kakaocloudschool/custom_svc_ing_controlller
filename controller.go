@@ -7,6 +7,7 @@ import (
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	netv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	appsinformers "k8s.io/client-go/informers/apps/v1"
@@ -125,7 +126,7 @@ func (c *controller) syncDeployment(ns, name string) error {
 		},
 	}
 	// 서비스를 생성한다.
-	_, err = c.clientset.CoreV1().Services(ns).Create(ctx, &svc, metav1.CreateOptions{})
+	s, err := c.clientset.CoreV1().Services(ns).Create(ctx, &svc, metav1.CreateOptions{})
 
 	if err != nil {
 		fmt.Printf("creating error %s", err.Error())
@@ -133,7 +134,52 @@ func (c *controller) syncDeployment(ns, name string) error {
 
 	//create ingress
 
-	return nil
+	return createIngress(ctx, c.clientset, s)
+}
+
+func createIngress(ctx context.Context, client kubernetes.Interface, svc *corev1.Service) error {
+	// Spec 작성
+	// 서비스 그룹 확인하기 kubernetes ingress godoc
+
+	pathType := "Prefix"
+	ingress := netv1.Ingress{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      svc.Name,
+			Namespace: svc.Namespace,
+			Annotations: map[string]string{
+				"nginx.ingress.kubernetes.io/rewrite-target": "/",
+			},
+		},
+		Spec: netv1.IngressSpec{
+			// []netv1.IngressRule 을 사용하는 이유는, 아래 내용이 여러개가 들어갈수 있기 때문에 이를 사용함, 1개면 사용하지 않아도 된다.  (kubernetes 문서 참조)
+			Rules: []netv1.IngressRule{
+				netv1.IngressRule{
+					// 실제 Ingress Rule은 Host 가 포함되도 되고 안해도 됨으로, 이를 제외하고 생성한다.
+					IngressRuleValue: netv1.IngressRuleValue{
+						HTTP: &netv1.HTTPIngressRuleValue{
+							Paths: []netv1.HTTPIngressPath{
+								netv1.HTTPIngressPath{
+									Path:     fmt.Sprintf("/%s", svc.Name),
+									PathType: (*netv1.PathType)(&pathType),
+									Backend: netv1.IngressBackend{
+										Service: &netv1.IngressServiceBackend{
+											Name: svc.Name,
+											Port: netv1.ServiceBackendPort{
+												Number: 80,
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+	// namespace 를 생성한 후 작업을 수행함으로 아래 작업을 수행함
+	_, err := client.NetworkingV1().Ingresses(svc.Namespace).Create(ctx, &ingress, metav1.CreateOptions{})
+	return err
 }
 
 func depLabels(dep appsv1.Deployment) map[string]string {
